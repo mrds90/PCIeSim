@@ -71,7 +71,7 @@ class PCIDevice:
             print(f"🚫 {self.name} ignoró TLP (no enumerado): {tlp}")
             return
 
-        print(f"📥 [{self.name}] Recibido TLP desde {origin.name if origin else 'N/A'}\n{tlp}")
+        print(f"📥 [{self.name} <- {origin.name if origin else 'N/A'}] Recibido TLP\n{tlp}")
 
         if path:
             if len(path) > 1:
@@ -128,6 +128,14 @@ class PCIDevice:
         for conn in self.connections:
             if conn not in visited:
                 conn.print_topology(visited, indent + 1)
+    
+    def _probe_device(self, cfg_read):
+        """Probe for device existence using Config Read"""
+        for device in self.connections:
+            if not device.enumerated:  # Only probe unenumerated devices
+                self.send(cfg_read, device)
+                return device
+        return None
 
 
 class Endpoint(PCIDevice):
@@ -151,16 +159,6 @@ class RootComplex(PCIDevice):
         super().__init__(name)
         self.next_bus = 1
         
-    def _probe_device(self, cfg_read):
-        """Probe for device existence using Config Read"""
-        for device in self.connections:
-            if not device.enumerated:  # Only probe unenumerated devices
-                self.send(cfg_read, device)
-                # Device exists if it handles the config read
-                if device._handle_tlp(cfg_read):
-                    return device
-        return None
-
     def _find_device_by_bdf(self, bus, device, function):
         """Support finding devices behind the switch"""
         if bus == self.secondary_bus:
@@ -172,16 +170,6 @@ class RootComplex(PCIDevice):
     def _enumerate_secondary_bus(self, switch, bus_num):
         """Enumerate devices behind a switch"""
         print(f"\n🔄 Enumerando bus secundario {bus_num} detrás de {switch.name}")
-        
-        # Configure switch with new bus number
-        cfg_write = ConfigWrite0(
-            requester_id=self,
-            device_num=switch.device,
-            function_num=0,
-            offset=0x18,  # Secondary bus number register
-            data=bus_num
-        )
-        self.send(cfg_write, switch)
         
         # Probe for devices on secondary bus
         for dev_num in range(32):
@@ -206,13 +194,16 @@ class RootComplex(PCIDevice):
                     )
                     self.send(cfg_write, device)
 
-    def enumerate(self):
-        print("\n🔍 Iniciando enumeración PCIe...")
-        self.set_bdf(0, 0, 0)  # RC siempre es 0:0.0
-        
-        # Enumerar dispositivos en el bus primario
-        current_device = 1  # Start from device 1 (0 is RC)
-        for device in self.connections:
+    def enumerate(self, bus = 0, node = None):
+        current_device = 0
+        if bus == 0:
+            print("\n🔍 Iniciando enumeración PCIe...")
+            self.set_bdf(0, 0, 0)  # RC siempre es 0:0.0
+            current_device = 1  # Start from device 1 (0 is RC)
+        if node is None:
+            node = self
+            # Enumerar dispositivos en el bus primario
+        for device in node.connections:
             if not device.enumerated:
                 cfg_read = ConfigRead0(
                     requester_id=self,
@@ -221,27 +212,35 @@ class RootComplex(PCIDevice):
                 )
                 
                 # Configure device if found
-                if self._probe_device(cfg_read):
-                    device.set_bdf(0, current_device, 0)
-                    
-                    # Configure BAR for endpoints
-                    if isinstance(device, Endpoint):
-                        cfg_write = ConfigWrite0(
-                            requester_id=self,
-                            device_num=current_device,
-                            function_num=0,
-                            offset=0x10,  # BAR0
-                            data=device.bar_start
-                        )
-                        self.send(cfg_write, device)
-                    
-                    # Configure switches and enumerate secondary bus
-                    elif isinstance(device, Switch):
-                        new_bus = self.next_bus
-                        self.next_bus += 1
-                        self._enumerate_secondary_bus(device, new_bus)
-                    
-                    current_device += 1
+                node.send(cfg_read, device)
+                device.set_bdf(bus, current_device, 0)
+                
+                # Configure BAR for endpoints
+                if isinstance(device, Endpoint):
+                    cfg_write = ConfigWrite0(
+                        requester_id=node,
+                        device_num=current_device,
+                        function_num=0,
+                        offset=0x10,  # BAR0
+                        data=device.bar_start
+                    )
+                    node.send(cfg_write, device)
+                
+                # Configure switches and enumerate secondary bus
+                elif isinstance(device, Switch):
+                    new_bus = self.next_bus
+                    self.next_bus += 1
+                    cfg_write = ConfigWrite0(
+                        requester_id=self,
+                        device_num=device.device,
+                        function_num=0,
+                        offset=0x18,  # Secondary bus number register
+                        data=new_bus
+                    )
+                    node.send(cfg_write, device)
+                    self.enumerate(new_bus, device)
+                
+                current_device += 1
 
 
 class Switch(PCIDevice):
@@ -412,24 +411,26 @@ def run_simulation():
     
     # 1. Crear dispositivos
     print("\n📦 Creando dispositivos...")
-    CPU = Host("CPU")
-    RC = RootComplex("RC")
+    CPU = RootComplex("CPU")
     SW1 = Switch("SW1")
+    SW2 = Switch("SW2")
     GPU = Endpoint("GPU", bar_start=0xC000_0000)
+    NVME = Endpoint("NVME", bar_start=0xC000_1000)
+    
 
     # 2. Establecer conexiones físicas
     print("\n🔌 Estableciendo conexiones...")
-    CPU.connect(RC)
-    RC.connect(SW1)
+    CPU.connect(SW1)
     SW1.connect(GPU)
+    CPU.connect(NVME)
 
     # 3. Proceso de enumeración
     print("\n📝 Iniciando proceso de enumeración...")
-    RC.enumerate()
+    CPU.enumerate()
 
     # 4. Mostrar topología resultante
     print("\n📡 Topología PCIe final:")
-    RC.print_topology()
+    CPU.print_topology()
 
     # 5. Simular transacciones de memoria
     print("\n💾 Simulando transacciones de memoria...")
@@ -453,7 +454,7 @@ def run_simulation():
         data=0xCAFEBABE,
         posted=False
     )
-    CPU.send(write_tlp_np, GPU)
+    CPU.send(write_tlp_np, NVME)
 
     # Posted write
     write_tlp_p = MemoryWrite(

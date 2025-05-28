@@ -55,7 +55,7 @@ class PCIDevice:
             print(f"🚫 {self.name} no puede enviar (no enumerado): {tlp}")
             return
 
-        print(f"\n[{self.name} -> {target.name}] Enviando TLP:\n{tlp}")
+        print(f"\n[{self.name} -> {target.name}] Enviando TLP:\n{tlp}\n")
         visited = set()
         path = self.find_path_to(target, visited)
         if path:

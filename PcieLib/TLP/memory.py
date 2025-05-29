@@ -11,5 +11,5 @@ class MemoryTLPRead(MemoryTLP):
     pass
 
 @dataclass
-class MemoryTLPWrite(MemoryTLP):
+class MemoryTLPWithData(MemoryTLP):
     data: List[int] = field(default_factory=list)

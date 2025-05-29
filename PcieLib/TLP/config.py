@@ -1,6 +1,6 @@
-from .tlp import TLP
+from .tlp import TLP, TLPWithData
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict
 
 CFG0RD = "Cfg0Rd"
 CFG1RD = "Cfg1Rd"
@@ -13,21 +13,25 @@ class Config(TLP):
     destination_id: Optional[Tuple[int, int, int]] = None
     byte_enable: Tuple[int, int] = (0xF, 0xF)
 
-    def __str__(self):
-        return (
-            f"TLP Type : Configuration Read Type 0 ({self.format})\n"
-            f"Requester ID : {self.requester_id}\n"
-            f"Device      : {self.destination_id}\n"
-            f"Address    : {self.address}\n"
-        )
+   
 
 @dataclass
 class ConfigRead(Config):
-    pass
-
+    type: str = field(init=False, default="config_read")
+    
+    def __str__(self):
+        return (
+        f"{self.format}: {self.requester_id} -> {self.destination_id} | 0x{self.address:X}"
+    )
 @dataclass
-class ConfigWrite(Config):
-    data: List[int] = field(default_factory=list)
+class ConfigWrite(Config, TLPWithData):
+    type: str = field(init=False, default="config_write")
+    def __str__(self):
+        data_str = " ".join(f"{b:02X}" for b in self.data)
+        return (
+            f"{self.format}: {self.requester_id} -> {self.destination_id} | "
+            f"0x{self.address:X} <= [{data_str}]"
+        )
 
 @dataclass
 class ConfigType0Read(ConfigRead):

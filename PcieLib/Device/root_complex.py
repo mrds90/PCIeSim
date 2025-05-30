@@ -61,7 +61,6 @@ class RootComplex(PCIEDevice):
                 if (offset) == 0:
                     self.enumerated_devices[source.get_bdf()] = source
                     print(f"{source.name} enumerado: BDF {source.get_bdf()}\n")
-                    # ⬇️ Ahora generamos otro Config Read para el offset 0x0C (Header Type)
                     cfg_header_type = self._build_config_tlp(CFG0RD,source.get_bdf(), 0x0C)
                     self._set_enum_state(source, EnumState.HEADER_TYPE)
                     self.send(cfg_header_type, source)
@@ -94,30 +93,33 @@ class RootComplex(PCIEDevice):
         self.enumerate()
 
     def _fsm_handle_bar_probe(self, tlp_processing: TLP, tlp_received:TLP, source:PCIEDevice):
+        offset = tlp_processing.address & 0xFF
         if tlp_processing.format == CFG0RD:
-            offset = tlp_processing.address & 0xFF
             if BARs.BAR0.value <= offset <= BARs.BAR5.value and offset % 4 == 0:
                 if tlp_received.bytes_to_dwords()[0] == 0:
                     # Trigger de size detection
                     bar_probe_write = self._build_config_tlp(CFG0WR, source.get_bdf(), offset, data=[0xFF, 0xFF, 0xFF, 0xFF])
                     self.send(bar_probe_write, source)
                     return
-                if offset < BARs.BAR5.value:
-                    bar_n_read = self._build_config_tlp(CFG0RD, source.get_bdf(), (offset + 0x4))
-                    self.send(bar_n_read, source)
+                
         elif tlp_processing.format == CFG0WR:
-            addr = tlp_processing.address
             data = tlp_processing.data
-            if BARs.BAR0.value <= addr <= BARs.BAR5.value and data == [0xFF, 0xFF, 0xFF, 0xFF]:
-                cfg_read = self._build_config_tlp(CFG0RD,source.get_bdf(), addr)
+            if BARs.BAR0.value <= offset <= BARs.BAR5.value and data == [0xFF, 0xFF, 0xFF, 0xFF]:
+                cfg_read = self._build_config_tlp(CFG0RD,source.get_bdf(), offset)
                 self._set_enum_state(source, EnumState.BAR_ASSIGN)
                 self.send(cfg_read, source)
                 return
+        
+        if offset < BARs.BAR5.value:
+            bar_n_read = self._build_config_tlp(CFG0RD, source.get_bdf(), (offset + 0x4))
+            self.send(bar_n_read, source)
+            return
+        
         self.enumerate()
 
     def _fsm_handle_bar_assign(self, tlp_processing: TLP, tlp_received:TLP, source:PCIEDevice):
+        offset = tlp_processing.address & 0xFF
         if tlp_processing.format == CFG0RD:
-            offset = tlp_processing.address & 0xFF
             if getattr(source, "bar_addresses", 0)[BARs(offset)] == 0xFFFFFFF0:
                 # El dispositivo acaba de responder con la máscara (ej: 0xFFFFFC00)
                 mask_bytes = tlp_received.data
@@ -132,12 +134,15 @@ class RootComplex(PCIEDevice):
                 addr_bytes = base_address.to_bytes(4, byteorder='little')
                 bar_write = self._build_config_tlp(CFG0WR, source.get_bdf(), offset, data=addr_bytes)
                 self.send(bar_write, source)
-                if offset < BARs.BAR5.value:
-                    bar_n_read = self._build_config_tlp(CFG0RD, source.get_bdf(), (offset + 0x4))
-                    self._set_enum_state(source, EnumState.BAR_PROBE)
-                    self.send(bar_n_read, source)
-                else:
-                    self._set_enum_state(source, EnumState.DONE)
+                return
+        elif tlp_processing.format == CFG0WR:
+            if offset < BARs.BAR5.value:
+                bar_n_read = self._build_config_tlp(CFG0RD, source.get_bdf(), (offset + 0x4))
+                self._set_enum_state(source, EnumState.BAR_PROBE)
+                self.send(bar_n_read, source)
+                return
+            else:
+                self._set_enum_state(source, EnumState.DONE)
         self.enumerate()
 
     def _next_tlp_id(self) -> int:

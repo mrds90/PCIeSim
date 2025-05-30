@@ -57,29 +57,33 @@ class Endpoint(PCIEDevice):
 
         if offset % 4 == 0:
             bar_enum = self._bar_enum_from_offset(offset)
-            if bar_enum and bar_enum in self._bar_sizes:
-                if self._read_config_dword(offset) == 0xFFFFFFFF:
-                    mask = ~(self._bar_sizes[bar_enum] - 1) & 0xFFFFFFFF
-                    val = mask
-                else:
-                    val = self._bar_addresses[bar_enum]
+            if bar_enum:
+                if bar_enum in self._bar_sizes:
+                    if self._read_config_dword(offset) == 0xFFFFFFFF:
+                        mask = ~(self._bar_sizes[bar_enum] - 1) & 0xFFFFFFFF
+                        val = mask
+                    else:
+                        val = self._bar_addresses[bar_enum]
 
-                data = [(val >> (8 * i)) & 0xFF for i in range(4)]
-                completion = CompletionWithData(
-                    format="CplD",
-                    type="completion",
-                    requester_id=tlp.requester_id,
-                    tag=tlp.tag,
-                    traffic_class=tlp.traffic_class,
-                    attributes=tlp.attributes,
-                    length=1,
-                    tlp_id=tlp.tlp_id,
-                    completer_id=(self._bus_number, self._device_number, self._function_number),
-                    byte_count=4,
-                    data=data
-                )
-                self.send(completion, source)
-                return
+                    data = [(val >> (8 * i)) & 0xFF for i in range(4)]
+                    completion = CompletionWithData(
+                        format="CplD",
+                        type="completion",
+                        requester_id=tlp.requester_id,
+                        tag=tlp.tag,
+                        traffic_class=tlp.traffic_class,
+                        attributes=tlp.attributes,
+                        length=1,
+                        tlp_id=tlp.tlp_id,
+                        completer_id=(self._bus_number, self._device_number, self._function_number),
+                        byte_count=4,
+                        data=data
+                    )
+                    print(f"{bar_enum.name} needs 0x{self._bar_sizes[bar_enum]:X} addresses")
+                    self.send(completion, source)
+                    return
+                else:
+                    print(f"{bar_enum.name} not used")
         super()._handle_config0_read(tlp, source)
 
     def _handle_config_write(self, tlp: ConfigType0Write, source: PCIEDevice):
@@ -91,7 +95,7 @@ class Endpoint(PCIEDevice):
             bar_enum = self._bar_enum_from_offset(offset)
             if bar_enum and bar_enum in self._bar_sizes:
                 self._bar_addresses[bar_enum] = data & 0xFFFFFFF0
-                print(f"{self._name} - {bar_enum.name} asignado a 0x{self._bar_addresses[bar_enum]:X}")
+                print(f"{self._name} -  0x{self._bar_addresses[bar_enum]:X} asignado a {bar_enum.name}")
 
         completion = CompletionWithoutData(
             format="Cpl",

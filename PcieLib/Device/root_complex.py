@@ -1,5 +1,5 @@
 from typing import Optional, Tuple, Dict, List
-from .pcie_device import PCIEDevice
+from .pcie_device import PCIEDevice, BARs
 from .endpoint import Endpoint
 from PcieLib.TLP import TLP, Completion, CompletionWithData, ConfigType0Read, ConfigType0Write, ConfigType1Read, ConfigType1Write, MemoryTLPRead, MemoryTLPWithData, CFG0RD, CFG1RD, CFG0WR, CFG1WR
 from itertools import count
@@ -85,7 +85,7 @@ class RootComplex(PCIEDevice):
                     return
                 elif (header_type & 0x7F) == 0x00:
                     print(f"Dispositivo {source.name}:{bdf} es un Endpoint (Header Type 0x{header_type:02X}).")
-                    bar0_read = self._build_config_tlp(CFG0RD, source.get_bdf(), 0x10)
+                    bar0_read = self._build_config_tlp(CFG0RD, source.get_bdf(), BARs.BAR0.value)
                     self._set_enum_state(source, EnumState.BAR_PROBE)
                     self.send(bar0_read, source)
                     return
@@ -96,16 +96,19 @@ class RootComplex(PCIEDevice):
     def _fsm_handle_bar_probe(self, tlp_processing: TLP, tlp_received:TLP, source:PCIEDevice):
         if tlp_processing.format == CFG0RD:
             offset = tlp_processing.address & 0xFF
-            if 0x10 <= offset <= 0x24 and offset % 4 == 0:
+            if BARs.BAR0.value <= offset <= BARs.BAR5.value and offset % 4 == 0:
                 if tlp_received.bytes_to_dwords()[0] == 0:
                     # Trigger de size detection
-                    bar_probe_write = self._build_config_tlp(CFG0WR, source.get_bdf(), 0x10, data=[0xFF, 0xFF, 0xFF, 0xFF])
+                    bar_probe_write = self._build_config_tlp(CFG0WR, source.get_bdf(), offset, data=[0xFF, 0xFF, 0xFF, 0xFF])
                     self.send(bar_probe_write, source)
                     return
+                if offset < BARs.BAR5.value:
+                    bar_n_read = self._build_config_tlp(CFG0RD, source.get_bdf(), (offset + 0x4))
+                    self.send(bar_n_read, source)
         elif tlp_processing.format == CFG0WR:
             addr = tlp_processing.address
             data = tlp_processing.data
-            if 0x10 <= addr <= 0x24 and data == [0xFF, 0xFF, 0xFF, 0xFF]:
+            if BARs.BAR0.value <= addr <= BARs.BAR5.value and data == [0xFF, 0xFF, 0xFF, 0xFF]:
                 cfg_read = self._build_config_tlp(CFG0RD,source.get_bdf(), addr)
                 self._set_enum_state(source, EnumState.BAR_ASSIGN)
                 self.send(cfg_read, source)
@@ -115,7 +118,7 @@ class RootComplex(PCIEDevice):
     def _fsm_handle_bar_assign(self, tlp_processing: TLP, tlp_received:TLP, source:PCIEDevice):
         if tlp_processing.format == CFG0RD:
             offset = tlp_processing.address & 0xFF
-            if getattr(source, "bar_address", 0) == 0xFFFFFFF0:
+            if getattr(source, "bar_addresses", 0)[BARs(offset)] == 0xFFFFFFF0:
                 # El dispositivo acaba de responder con la máscara (ej: 0xFFFFFC00)
                 mask_bytes = tlp_received.data
                 mask_dword = int.from_bytes(mask_bytes, byteorder='little')
@@ -127,9 +130,14 @@ class RootComplex(PCIEDevice):
                 self.memory_map.setdefault(source.get_bdf(), []).append((offset, base_address, size))
                 # Escribir la dirección al BAR del dispositivo
                 addr_bytes = base_address.to_bytes(4, byteorder='little')
-                bar_write = self._build_config_tlp(CFG0WR, source.get_bdf(), 0x10, data=addr_bytes)
-                self._set_enum_state(source, EnumState.DONE)
+                bar_write = self._build_config_tlp(CFG0WR, source.get_bdf(), offset, data=addr_bytes)
                 self.send(bar_write, source)
+                if offset < BARs.BAR5.value:
+                    bar_n_read = self._build_config_tlp(CFG0RD, source.get_bdf(), (offset + 0x4))
+                    self._set_enum_state(source, EnumState.BAR_PROBE)
+                    self.send(bar_n_read, source)
+                else:
+                    self._set_enum_state(source, EnumState.DONE)
         self.enumerate()
 
     def _next_tlp_id(self) -> int:
@@ -186,7 +194,6 @@ class RootComplex(PCIEDevice):
                 )
                 self.send(cfg0rd, dev)
                 break  # enumeramos de a uno como en el bus 0
-
 
     def _next_available_bus_number(self) -> int:
         used_buses = {bus for (bus, _, _) in self.enumerated_devices}

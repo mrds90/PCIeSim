@@ -44,7 +44,7 @@ class Endpoint(PCIEDevice):
         elif isinstance(tlp, MemoryTLPWithData):
             return self._handle_mem_write(tlp, source)
         else:
-            print(f"{self._name} recibió un TLP no soportado: {tlp}")
+            print(f"{self.name} recibió un TLP no soportado: {tlp}")
 
     def _bar_enum_from_offset(self, offset: int) -> Optional[BARs]:
         try:
@@ -62,6 +62,7 @@ class Endpoint(PCIEDevice):
                     if self._read_config_dword(offset) == 0xFFFFFFFF:
                         mask = ~(self._bar_sizes[bar_enum] - 1) & 0xFFFFFFFF
                         val = mask
+                        print(f"{bar_enum.name} needs 0x{self._bar_sizes[bar_enum]:X} addresses")
                     else:
                         val = self._bar_addresses[bar_enum]
 
@@ -79,7 +80,6 @@ class Endpoint(PCIEDevice):
                         byte_count=4,
                         data=data
                     )
-                    print(f"{bar_enum.name} needs 0x{self._bar_sizes[bar_enum]:X} addresses")
                     self.send(completion, source)
                     return
                 else:
@@ -95,7 +95,7 @@ class Endpoint(PCIEDevice):
             bar_enum = self._bar_enum_from_offset(offset)
             if bar_enum and bar_enum in self._bar_sizes:
                 self._bar_addresses[bar_enum] = data & 0xFFFFFFF0
-                print(f"{self._name} -  0x{self._bar_addresses[bar_enum]:X} asignado a {bar_enum.name}")
+                print(f"{self.name} -  0x{self._bar_addresses[bar_enum]:X} asignado a {bar_enum.name}")
 
         completion = CompletionWithoutData(
             format="Cpl",

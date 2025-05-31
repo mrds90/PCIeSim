@@ -15,23 +15,30 @@ class BARs(Enum):
     BAR5 = 0x24
 
 class PCIEDevice(ABC):
-    
-    def __init__(self, name:str):
+
+    MAX_NAME_LENGTH = 4  # 2 chars for vendor_id, 2 for device_id
+
+    def __init__(self, name: str):
+        if len(name) > self.MAX_NAME_LENGTH:
+            raise ValueError(f"Name '{name}' exceeds {self.MAX_NAME_LENGTH} characters.")
+
+        padded_name = name.ljust(self.MAX_NAME_LENGTH)  # pad with spaces if needed
+        vendor_str = padded_name[:2]
+        device_str = padded_name[2:]
+
+        # Convert characters to integer byte values
+        vendor_id = (ord(vendor_str[1]) << 8) + ord(vendor_str[0])
+        device_id = (ord(device_str[1]) << 8) + ord(device_str[0])
+
         self._parent = None
         self._links = []
-        self._config_space = {}
         self._bus_number = None
         self._device_number = None
         self._function_number = None
         self._enabled = False
-        self._name = name
         self.incoming_queue = Queue()
         self._running = True
 
-        vendor_id = random.randint(0x0001, 0xFFFF)
-        device_id = random.randint(0x0000, 0xFFFF)
-
-        # Espacio de configuración PCI
         self._config_space: Dict[int, int] = {
             0x00: vendor_id & 0xFF,         # Vendor ID low byte
             0x01: (vendor_id >> 8) & 0xFF,  # Vendor ID high byte
@@ -46,11 +53,10 @@ class PCIEDevice(ABC):
             0x0A: random.randint(0x00, 0xFF), # Class Code byte 1 (Sub-class)
             0x0B: random.randint(0x00, 0xFF), # Class Code byte 0 (Programming Interface)
             0x0D: 0x00,                      # BIST
-            # Header Type lo definimos en la clase derivada (switch, endpoint)
         }
         # Lanzamos el thread en segundo plano para manejar la cola
         self._thread = threading.Thread(target=self._process_loop, daemon=True)
-        self._thread.start()
+        self._thread.start()      
 
     def send(self, tlp: TLP, destination: 'PCIEDevice'):
         if isinstance(tlp, Completion):
@@ -156,5 +162,12 @@ class PCIEDevice(ABC):
         return self._function_number
     
     @property
-    def name(self):
-        return self._name
+    def name(self) -> str:
+        # Reconstruct name from vendor_id and device_id in config space
+        vendor_id = (self._config_space[0x01] << 8) + self._config_space[0x00]
+        device_id = (self._config_space[0x03] << 8) + self._config_space[0x02]
+
+        vendor_str = chr(vendor_id & 0xFF) + chr((vendor_id >> 8) & 0xFF)
+        device_str = chr(device_id & 0xFF) + chr((device_id >> 8) & 0xFF)
+
+        return (vendor_str + device_str).rstrip() # strip right-side spaces

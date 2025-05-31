@@ -81,7 +81,7 @@ class RootComplex(PCIEDevice):
                     print(f"Dispositivo {self._completion_device_name(tlp_received)}:{bdf} es un Switch (Header Type 0x{header_type:02X}).")
                     self._set_enum_state(tlp_received, EnumState.SEC_BUS)
                     self._current_bus = self._next_available_bus_number()
-                    self.enumerate(source)  # 🚀 enumerar el nuevo bus detrás del switch
+                    self.enumerate(source)  # 🚀 enumerar el nuevo bus detrás del switch (todo: en realidad tengo que configurar el espacio de memoria del switch con su secondary y subordinate)
                     return
                 elif (header_type & 0x7F) == 0x00:
                     print(f"Dispositivo {self._completion_device_name(tlp_received)}:{bdf} es un Endpoint (Header Type 0x{header_type:02X}).")
@@ -143,18 +143,26 @@ class RootComplex(PCIEDevice):
     def _next_tlp_id(self) -> int:
         return next(i for i in count() if i not in self._tlps)
 
-    def enumerate(self):
+    def enumerate(self, source: PCIEDevice | None = None):
         if not self._enabled:
             self.enumerated_devices[(0, 0, 0)] = self.name
             self.set_bdf(0,0,0)
             self._enabled = True
         self._current_bus = self._current_bus - 1 if self._current_bus > 0 else 0
-        if not self._current_bus:
+        if self._current_bus > 0 and source == None:
+            raise ValueError("Falta especificar el SW que conduce a ese Bus")
+        if source == None:
             for device in self._links:
                 if not device._enabled: #Todo: si no tienen estados definidos en la FSM de enumeracion
-                    device_number = self._next_free_device_number(self._bus_number)  # siguiente device libre en bus 0
-                    self._send_cfg_read((self._bus_number, device_number, 0), 0x00, device)
+                    source = device
                     break
+            else:
+                return
+        device_number = self._next_free_device_number(self._current_bus)  # siguiente device libre en bus 0
+        bfd = (self._current_bus, device_number, 0)
+        self.device_state[bfd] = EnumState.DISCOVERY
+        self._send_cfg_read(bfd, 0x00, source)
+
     
     def _send_cfg_read(self, bdf: Tuple[int, int, int], offset, source):
         bus = bdf[0]

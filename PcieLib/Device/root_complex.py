@@ -102,6 +102,7 @@ class RootComplex(PCIEDevice):
         bdf = tlp_received.completer_id
         if self._is_cfgw_access_valid(tlp_processing, bdf):
             if (tlp_processing.address & 0xFF) == 0x18:
+                self._set_enum_state(tlp_received, EnumState.DONE)
                 self.enumerate(source)
                 return
         print(f"⚠️ Ignorando respuesta en SEC_BUS: offset {tlp_processing.address & 0xFF:02X} != 0x18")

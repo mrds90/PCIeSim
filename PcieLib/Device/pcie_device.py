@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, List
 from abc import ABC, abstractmethod
 import threading
 from queue import Queue
@@ -31,7 +31,7 @@ class PCIEDevice(ABC):
         device_id = (ord(device_str[1]) << 8) + ord(device_str[0])
 
         self._parent = None
-        self._links = []
+        self._links: List['PCIEDevice'] = []
         self._bus_number = None
         self._device_number = None
         self._function_number = None
@@ -131,7 +131,7 @@ class PCIEDevice(ABC):
     def get_bdf(self):
         return(self._bus_number,self._device_number,self._function_number)
     
-    def get_downstream_devices(self):
+    def get_downstream_devices(self) -> List['PCIEDevice']:
         return self._links
    
     @property

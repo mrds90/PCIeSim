@@ -1,7 +1,7 @@
 from typing import Optional, Tuple, Dict, List
 from .pcie_device import PCIEDevice, BARs
 from .endpoint import Endpoint
-from PcieLib.TLP import TLP, Completion, CompletionWithData, ConfigType0Read, ConfigType0Write, ConfigType1Read, ConfigType1Write, MemoryTLPRead, MemoryTLPWithData, CFG0RD, CFG1RD, CFG0WR, CFG1WR
+from PcieLib.TLP import TLP, Completion, CompletionWithData, ConfigRead, ConfigWrite, ConfigType0Read, ConfigType0Write, ConfigType1Read, ConfigType1Write, MemoryTLPRead, MemoryTLPWithData, CFG0RD, CFG1RD, CFG0WR, CFG1WR
 from itertools import count
 from enum import Enum
 
@@ -39,40 +39,45 @@ class RootComplex(PCIEDevice):
         pass
 
     def _handle_completion(self, tlp: Completion, source: PCIEDevice):
-    # Verifico si el tlp_id corresponde a una TLP que estamos esperando (request)
-
         if tlp.tlp_id in self._tlps:
-            # Obtengo la TLP original que generó esta respuesta
-            tlp_processing = self._tlps.pop(tlp.tlp_id)  # la saco del dict, ya que fue respondida
+            tlp_processing = self._tlps.pop(tlp.tlp_id)
             state = self.device_state.get(tlp.completer_id, EnumState.DISCOVERY)
 
             if state == EnumState.DISCOVERY:
                 self._fsm_handle_discovery(tlp_processing, tlp, source)
             elif state == EnumState.HEADER_TYPE:
                 self._fsm_handle_header_type(tlp_processing, tlp, source)
+            elif state == EnumState.SEC_BUS:
+                self._fsm_handle_sec_bus(tlp_processing, tlp, source)
             elif state == EnumState.BAR_PROBE:
                 self._fsm_handle_bar_probe(tlp_processing, tlp, source)
             elif state == EnumState.BAR_ASSIGN:
                 self._fsm_handle_bar_assign(tlp_processing, tlp, source)
+
 
     def _set_enum_state(self, tlp:Completion, state:EnumState):
         print(f"{self._completion_device_name(tlp)}: Enum state {state.value}")
         self.device_state[tlp.completer_id] = state
 
     def _fsm_handle_discovery(self, tlp_processing: TLP, tlp_received:CompletionWithData, source:PCIEDevice):
-        if tlp_processing.format == CFG0RD:
-                offset = tlp_processing.address & 0xFF
-                if (offset) == 0:
-                    device_name = ''.join(chr(b) for b in tlp_received.data).replace(' ', '')
-                    self.enumerated_devices[tlp_received.completer_id] = device_name
-                    print(f"{device_name} enumerado: BDF {tlp_received.completer_id}\n")
-                    self._set_enum_state(tlp_received, EnumState.HEADER_TYPE)
-                    self._send_cfg_read(tlp_received.completer_id, 0x0C, source)
-                    return
-        self.enumerate()
+        if (self._is_cfgr_access_valid(tlp_processing, tlp_received.completer_id)):
+            offset = tlp_processing.address & 0xFF
+            if offset == 0 and tlp_received.data[:4] != [0xFF, 0xFF, 0xFF, 0xFF]:
+                device_name = ''.join(chr(b) for b in tlp_received.data).replace(' ', '')
+                self.enumerated_devices[tlp_received.completer_id] = device_name
+                print(f"{device_name} enumerado: BDF {tlp_received.completer_id}\n")
+                self._set_enum_state(tlp_received, EnumState.HEADER_TYPE)
+                self._send_cfg_read(tlp_received.completer_id, 0x0C, source)
+                return
+        self._current_bus = self._current_bus - 1 if self._current_bus > 0 else 0
+        
+        if self._current_bus > 0:
+            self.enumerate(source)
+        else:
+            self.enumerate()
 
     def _fsm_handle_header_type(self, tlp_processing: TLP, tlp_received:Completion, source:PCIEDevice):
-        if tlp_processing.format == CFG0RD:
+        if (self._is_cfgr_access_valid(tlp_processing, tlp_received.completer_id)):
             offset = tlp_processing.address & 0xFF
             if (offset) == 0x0C:
                 header_type = tlp_received.data[0]  # asumimos que data es una lista de bytes
@@ -81,7 +86,7 @@ class RootComplex(PCIEDevice):
                     print(f"Dispositivo {self._completion_device_name(tlp_received)}:{bdf} es un Switch (Header Type 0x{header_type:02X}).")
                     self._set_enum_state(tlp_received, EnumState.SEC_BUS)
                     self._current_bus = self._next_available_bus_number()
-                    self.enumerate(source)  # 🚀 enumerar el nuevo bus detrás del switch (todo: en realidad tengo que configurar el espacio de memoria del switch con su secondary y subordinate)
+                    self._configure_switch_buses(bdf, source, self._current_bus)
                     return
                 elif (header_type & 0x7F) == 0x00:
                     print(f"Dispositivo {self._completion_device_name(tlp_received)}:{bdf} es un Endpoint (Header Type 0x{header_type:02X}).")
@@ -92,16 +97,28 @@ class RootComplex(PCIEDevice):
                     print(f"Dispositivo {self._completion_device_name(tlp_received)}:{bdf} tiene un tipo desconocido: 0x{header_type:02X}.\n")
         self.enumerate()
 
+
+    def _fsm_handle_sec_bus(self, tlp_processing: ConfigWrite, tlp_received: Completion, source: PCIEDevice):
+        bdf = tlp_received.completer_id
+        if self._is_cfgw_access_valid(tlp_processing, bdf):
+            if (tlp_processing.address & 0xFF) == 0x18:
+                self.enumerate(source)
+                return
+        print(f"⚠️ Ignorando respuesta en SEC_BUS: offset {tlp_processing.address & 0xFF:02X} != 0x18")
+
+
+
+
     def _fsm_handle_bar_probe(self, tlp_processing: TLP, tlp_received:Completion, source:PCIEDevice):
         offset = tlp_processing.address & 0xFF
-        if tlp_processing.format == CFG0RD:
+        if (self._is_cfgr_access_valid(tlp_processing, tlp_received.completer_id)):
             if BARs.BAR0.value <= offset <= BARs.BAR5.value and offset % 4 == 0:
                 if tlp_received.bytes_to_dwords()[0] == 0:
                     # Trigger de size detection
                     self._send_cfg_write(tlp_received.completer_id, offset, [0xFF]*4, source)
                     return
 
-        elif tlp_processing.format == CFG0WR:
+        elif self._is_cfgw_access_valid(tlp_processing, tlp_received.completer_id):
             data = tlp_processing.data
             if BARs.BAR0.value <= offset <= BARs.BAR5.value and data == [0xFF, 0xFF, 0xFF, 0xFF]:
                 self._set_enum_state(tlp_received, EnumState.BAR_ASSIGN)
@@ -111,27 +128,28 @@ class RootComplex(PCIEDevice):
         if offset < BARs.BAR5.value:
             self._send_cfg_read(tlp_received.completer_id, (offset + 0x4), source)
             return
-
-        self.enumerate()
+        if self._current_bus > 0:
+            self.enumerate(source)
+        else:
+            self.enumerate()
 
     def _fsm_handle_bar_assign(self, tlp_processing: TLP, tlp_received:Completion, source:PCIEDevice):
         offset = tlp_processing.address & 0xFF
-        if tlp_processing.format == CFG0RD:
-            if getattr(source, "bar_addresses", 0)[BARs(offset)] == 0xFFFFFFF0:
-                # El dispositivo acaba de responder con la máscara (ej: 0xFFFFFC00)
-                mask_bytes = tlp_received.data
-                mask_dword = int.from_bytes(mask_bytes, byteorder='little')
-                size = ~(mask_dword & 0xFFFFFFF0) + 1  # Solo si es BAR de memoria
-                # Asignar dirección alineada
-                base_address = (self.next_free_address + size - 1) & ~(size - 1)
-                self.next_free_address = base_address + size
-                # Guardar en source y memoria del RC
-                self.memory_map.setdefault(tlp_received.completer_id, []).append((offset, base_address, size))
-                # Escribir la dirección al BAR del dispositivo
-                addr_bytes = base_address.to_bytes(4, byteorder='little')
-                self._send_cfg_write(tlp_received.completer_id, offset, addr_bytes, source)
-                return
-        elif tlp_processing.format == CFG0WR:
+        if (self._is_cfgr_access_valid(tlp_processing, tlp_received.completer_id)):
+            # El dispositivo acaba de responder con la máscara (ej: 0xFFFFFC00)
+            mask_bytes = tlp_received.data
+            mask_dword = int.from_bytes(mask_bytes, byteorder='little')
+            size = ~(mask_dword & 0xFFFFFFF0) + 1  # Solo si es BAR de memoria
+            # Asignar dirección alineada
+            base_address = (self.next_free_address + size - 1) & ~(size - 1)
+            self.next_free_address = base_address + size
+            # Guardar en source y memoria del RC
+            self.memory_map.setdefault(tlp_received.completer_id, []).append((offset, base_address, size))
+            # Escribir la dirección al BAR del dispositivo
+            addr_bytes = base_address.to_bytes(4, byteorder='little')
+            self._send_cfg_write(tlp_received.completer_id, offset, addr_bytes, source)
+            return
+        elif self._is_cfgw_access_valid(tlp_processing, tlp_received.completer_id):
             if offset < BARs.BAR5.value:
                 self._set_enum_state(tlp_received, EnumState.BAR_PROBE)
                 self._send_cfg_read(tlp_received.completer_id, (offset + 0x4), source)
@@ -140,15 +158,11 @@ class RootComplex(PCIEDevice):
                 self._set_enum_state(tlp_received, EnumState.DONE)
         self.enumerate()
 
-    def _next_tlp_id(self) -> int:
-        return next(i for i in count() if i not in self._tlps)
-
     def enumerate(self, source: PCIEDevice | None = None):
         if not self._enabled:
             self.enumerated_devices[(0, 0, 0)] = self.name
             self.set_bdf(0,0,0)
             self._enabled = True
-        self._current_bus = self._current_bus - 1 if self._current_bus > 0 else 0
         if self._current_bus > 0 and source == None:
             raise ValueError("Falta especificar el SW que conduce a ese Bus")
         if source == None:
@@ -161,7 +175,20 @@ class RootComplex(PCIEDevice):
         device_number = self._next_free_device_number(self._current_bus)  # siguiente device libre en bus 0
         bfd = (self._current_bus, device_number, 0)
         self.device_state[bfd] = EnumState.DISCOVERY
+        print("looking for a new device")
         self._send_cfg_read(bfd, 0x00, source)
+    
+    def _next_tlp_id(self) -> int:
+        return next(i for i in count() if i not in self._tlps)
+
+    def _configure_switch_buses(self, bdf, source: PCIEDevice, secondary_bus: int):
+        primary = bdf[0]
+        subordinate = secondary_bus  # valor inicial, puede ser actualizado más adelante
+
+        data = [primary, secondary_bus, subordinate, 0x00]  # último byte reservado/no usado
+        self._send_cfg_write(bdf, 0x18, data, source)
+        
+        print(f"🛠️ Configurando switch {bdf}: Primary={primary}, Secondary={secondary_bus}, Subordinate={subordinate}")
 
     
     def _send_cfg_read(self, bdf: Tuple[int, int, int], offset, source):
@@ -187,30 +214,6 @@ class RootComplex(PCIEDevice):
         self._tlps[tlp.tlp_id] = tlp
         super().send(tlp,dest)
 
-    def enumerate_secondary_bus(self, device: PCIEDevice):
-        # 1. Asignar bus secundario al switch
-        secondary_bus = self._next_available_bus_number()
-        device.set_secondary_bus_number(secondary_bus)
-
-        print(f"{device.name} asignado Secondary Bus = {secondary_bus}")
-
-        # 2. Enumerar todos los dispositivos conectados a ese bus
-        for dev in device.get_downstream_devices():
-            if not dev._enabled:
-                tlp_id = self._next_tlp_id()
-                cfg0rd = ConfigType0Read(
-                    requester_id=(self._bus_number, self._device_number, self._function_number),
-                    destination_id=(secondary_bus, 0, 0),  # empezamos con Dev 0, Func 0
-                    tag=0,
-                    traffic_class=0,
-                    attributes=0,
-                    length=1,
-                    tlp_id=tlp_id,
-                    address=0x00
-                )
-                self.send(cfg0rd, dev)
-                break  # enumeramos de a uno como en el bus 0
-
     def _next_available_bus_number(self) -> int:
         used_buses = {bus for (bus, _, _) in self.enumerated_devices}
         for bus_num in range(256):
@@ -227,6 +230,20 @@ class RootComplex(PCIEDevice):
             if num not in used_device_numbers:
                 return num
         raise RuntimeError(f"No hay espacio libre en el bus {bus_number}")
+
+    def _is_cfgr_access_valid(self, tlp: TLP, bdf: Tuple[int, int, int]) -> bool:
+        if tlp.format == CFG0RD and bdf[0] == 0:
+            return True
+        elif tlp.format == CFG1RD and bdf[0] > 0:
+            return True
+        return False
+
+    def _is_cfgw_access_valid(self, tlp: TLP, bdf: Tuple[int, int, int]) -> bool:
+        if tlp.format == CFG0WR and bdf[0] == 0:
+            return True
+        elif tlp.format == CFG1WR and bdf[0] > 0:
+            return True
+        return False
 
     def _build_config_tlp(self, tlp_type: str, destination_id: Tuple[int, int, int], address: int, data: Optional[List[int]] = None) -> TLP:
         tlp_id = self._next_tlp_id()

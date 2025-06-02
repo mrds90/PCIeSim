@@ -1,7 +1,6 @@
 from typing import Optional, Tuple, Dict
 from .pcie_device import PCIEDevice, BARs
 from PcieLib.TLP import TLP, TLPWithData, ConfigType0Read, ConfigType0Write, MemoryTLPRead, MemoryTLPWithData, Completion, CompletionWithData, CompletionWithoutData
-import random
 
 from typing import Optional, Dict, Tuple
 
@@ -27,12 +26,6 @@ class Endpoint(PCIEDevice):
             # Initialize BAR register in config space
             for i in range(4):
                 self._config_space[bar_enum.value + i] = 0
-
-    def set_id(self, device_id: int, vendor_id: int):
-        self._config_space[0x00] = vendor_id & 0xFF
-        self._config_space[0x01] = (vendor_id >> 8) & 0xFF
-        self._config_space[0x02] = device_id & 0xFF
-        self._config_space[0x03] = (device_id >> 8) & 0xFF
 
     def receive(self, tlp: TLP, source: PCIEDevice):
         if isinstance(tlp, ConfigType0Read):

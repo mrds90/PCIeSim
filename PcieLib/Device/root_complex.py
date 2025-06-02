@@ -298,3 +298,13 @@ class RootComplex(PCIEDevice):
         else:
             raise ValueError(f"TLP type '{tlp_type}' no reconocido.")
 
+    def print_topology(self):
+        print("PCIe Topology:")
+        for bdf, name in self.enumerated_devices.items():
+            bus, device, function = bdf
+            tabulation = "  " * (bus + 1)
+            if bdf != self.get_bdf():
+                print(f"{tabulation}└─{name} [{bus:02x}:{device:02x}.{function}] ")
+            else:
+                print(f"{name} [{bus:02x}:{device:02x}.{function}]")
+
